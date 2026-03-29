@@ -19,8 +19,8 @@ read_input_yn() {
     echo
 }
 
-REPO_URL="https://github.com/Monolit-service/Mono-BOT3.git"
-PROJECT_DIR="Mono-BOT3"
+REPO_URL="https://github.com/Monolit-service/TestMONO.git"
+PROJECT_DIR="TestMONO"
 NGINX_CONF_FILE="/etc/nginx/sites-available/${PROJECT_DIR}.conf"
 
 echo -e "${GREEN}--- Запуск скрипта установки/обновления 3xui-ShopBot ---${NC}"
