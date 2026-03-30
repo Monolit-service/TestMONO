@@ -1945,6 +1945,14 @@ def get_user_router() -> Router:
 
         await state.update_data(final_price=float(final_price))
 
+        effective_payment_methods = dict(PAYMENT_METHODS or {})
+        if effective_payment_methods.get("lavatop") and final_price != price:
+            effective_payment_methods["lavatop"] = False
+            message_text += (
+                "\n\nℹ️ Lava.top доступен только для оплаты по базовой цене тарифа "
+                "без скидок и промокодов."
+            )
+
         # Получаем основной баланс для показа кнопки оплаты с баланса
         try:
             main_balance = get_balance(message.chat.id)
@@ -1957,7 +1965,7 @@ def get_user_router() -> Router:
             await message.edit_text(
                 message_text,
                 reply_markup=keyboards.create_payment_method_keyboard(
-                    payment_methods=PAYMENT_METHODS,
+                    payment_methods=effective_payment_methods,
                     action=data.get('action'),
                     key_id=data.get('key_id'),
                     show_balance=show_balance_btn,
@@ -1970,7 +1978,7 @@ def get_user_router() -> Router:
             await message.answer(
                 message_text,
                 reply_markup=keyboards.create_payment_method_keyboard(
-                    payment_methods=PAYMENT_METHODS,
+                    payment_methods=effective_payment_methods,
                     action=data.get('action'),
                     key_id=data.get('key_id'),
                     show_balance=show_balance_btn,
@@ -2175,8 +2183,12 @@ def get_user_router() -> Router:
 
         customer_email = (data.get('customer_email') or get_setting("receipt_email") or "").strip()
         if not customer_email or not is_valid_email(customer_email):
-            await callback.message.answer("Для оплаты через Lava.top нужен корректный email.")
-            await state.clear()
+            await callback.message.answer(
+                "Для оплаты через Lava.top нужен корректный email.\n\n"
+                "Отправьте email в формате `name@example.com`.",
+                parse_mode="Markdown"
+            )
+            await state.set_state(PaymentProcess.waiting_for_email)
             return
 
         base_price = Decimal(str(plan['price']))
@@ -2199,6 +2211,13 @@ def get_user_router() -> Router:
 
         if final_price_decimal < Decimal('0'):
             final_price_decimal = Decimal('0.00')
+
+        if final_price_decimal != base_price:
+            await callback.message.answer(
+                "Lava.top сейчас доступен только для оплаты по полной цене тарифа "
+                "без скидок и промокодов. Выберите другой способ оплаты."
+            )
+            return
 
         months = int(plan['months'])
         amount_rub = int(final_price_decimal.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
