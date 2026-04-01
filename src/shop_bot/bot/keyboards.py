@@ -670,7 +670,7 @@ def create_payment_method_keyboard(
     if payment_methods and payment_methods.get("cryptobot"):
         builder.button(text="🤖 CryptoBot", callback_data="pay_cryptobot")
     if payment_methods and payment_methods.get("lavatop"):
-        builder.button(text="🌋 Lava.top", callback_data="pay_lavatop")
+        builder.button(text="🌋 Lava.top (Оплата картой РФ)", callback_data="pay_lavatop")
     if payment_methods and payment_methods.get("yoomoney"):
         builder.button(text="💜 ЮMoney (кошелёк)", callback_data="pay_yoomoney")
     if payment_methods and payment_methods.get("stars"):
