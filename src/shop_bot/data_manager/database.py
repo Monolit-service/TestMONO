@@ -34,7 +34,8 @@ def initialize_db():
                     referred_by INTEGER,
                     referral_balance REAL DEFAULT 0,
                     referral_balance_all REAL DEFAULT 0,
-                    referral_start_bonus_received BOOLEAN DEFAULT 0
+                    referral_start_bonus_received BOOLEAN DEFAULT 0,
+                    pending_referral_days INTEGER DEFAULT 0
                 )
             ''')
 
@@ -264,8 +265,8 @@ def initialize_db():
                 # Referral program advanced
                 "enable_fixed_referral_bonus": "false",
                 "fixed_referral_bonus_amount": "50",
-                "referral_reward_type": "percent_purchase",  # percent_purchase | fixed_purchase | fixed_start_referrer
-                "referral_on_start_referrer_amount": "20",
+                "referral_reward_type": "subscription_days",  # subscription_days
+                "referral_days_per_invite": "3",
                 # Backups
                 "backup_interval_days": "1",
                 # Telegram Stars payments
@@ -644,6 +645,12 @@ def run_migration():
             logging.info(" -> Столбец 'referral_start_bonus_received' успешно добавлен.")
         else:
             logging.info(" -> Столбец 'referral_start_bonus_received' уже существует.")
+
+        if 'pending_referral_days' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN pending_referral_days INTEGER DEFAULT 0")
+            logging.info(" -> Столбец 'pending_referral_days' успешно добавлен.")
+        else:
+            logging.info(" -> Столбец 'pending_referral_days' уже существует.")
         
         logging.info("Таблица 'users' успешно обновлена.")
 
@@ -1519,6 +1526,39 @@ def is_admin(user_id: int) -> bool:
     except Exception:
         return False
         
+def add_pending_referral_days(user_id: int, days: int) -> bool:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET pending_referral_days = COALESCE(pending_referral_days, 0) + ? WHERE telegram_id = ?", (int(days), user_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось добавить отложенные реферальные дни для пользователя {user_id}: {e}")
+        return False
+
+def get_pending_referral_days(user_id: int) -> int:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(pending_referral_days, 0) FROM users WHERE telegram_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return int(row[0] or 0) if row else 0
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось получить отложенные реферальные дни для пользователя {user_id}: {e}")
+        return 0
+
+def clear_pending_referral_days(user_id: int) -> bool:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET pending_referral_days = 0 WHERE telegram_id = ?", (user_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось очистить отложенные реферальные дни для пользователя {user_id}: {e}")
+        return False
+
 def get_referrals_for_user(user_id: int) -> list[dict]:
     """Возвращает список пользователей, которых пригласил данный user_id.
     Поля: telegram_id, username, registration_date, total_spent.

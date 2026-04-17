@@ -48,7 +48,7 @@ from shop_bot.data_manager.database import (
     get_balance, deduct_from_balance,
     get_key_by_email, add_to_balance,
     add_to_referral_balance_all, get_referral_balance_all,
-    get_referral_balance,
+    get_referral_balance, get_pending_referral_days, add_pending_referral_days, clear_pending_referral_days,
     is_admin,
     set_referral_start_bonus_received,
     find_and_complete_pending_transaction,
@@ -75,6 +75,45 @@ CRYPTO_BOT_TOKEN = get_setting("cryptobot_token")
 
 logger = logging.getLogger(__name__)
 
+REFERRAL_DAYS_PER_INVITE = 3
+
+async def _apply_referral_days_to_subscription(referrer_id: int, days: int) -> tuple[bool, str | None]:
+    try:
+        keys = get_user_keys(referrer_id) or []
+    except Exception as e:
+        logger.warning(f"Referral days: cannot fetch keys for {referrer_id}: {e}")
+        return False, None
+
+    if not keys:
+        return False, None
+
+    def _sort_key(k):
+        return (str(k.get('expiry_date') or ''), int(k.get('key_id') or 0))
+
+    key = sorted(keys, key=_sort_key, reverse=True)[0]
+    host_name = key.get('host_name')
+    email = key.get('key_email')
+    key_id = key.get('key_id')
+    if not host_name or not email or not key_id:
+        return False, None
+
+    result = await xui_api.create_or_update_key_on_host(host_name, email, days_to_add=int(days))
+    if not result or not result.get('client_uuid') or not result.get('expiry_timestamp_ms'):
+        return False, None
+
+    try:
+        update_key_info(key_id, result['client_uuid'], int(result['expiry_timestamp_ms']))
+    except Exception as e:
+        logger.warning(f"Referral days: cannot update local key info for {referrer_id}: {e}")
+
+    expiry_text = None
+    try:
+        expiry_text = datetime.fromtimestamp(int(result['expiry_timestamp_ms']) / 1000).strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        expiry_text = None
+    return True, expiry_text
+
+
 class KeyPurchase(StatesGroup):
     waiting_for_host_selection = State()
     waiting_for_plan_selection = State()
@@ -85,6 +124,9 @@ class Onboarding(StatesGroup):
 class PaymentProcess(StatesGroup):
     waiting_for_email = State()
     waiting_for_payment_method = State()
+    waiting_for_promo_code = State()
+
+class QuickPromoProcess(StatesGroup):
     waiting_for_promo_code = State()
     waiting_for_cryptobot_payment = State()
 
@@ -207,45 +249,47 @@ def get_user_router() -> Router:
         username = message.from_user.username or message.from_user.full_name
         user_data = get_user(user_id)
 
-        # Бонус при старте для пригласившего (fixed_start_referrer): единоразово, когда новый пользователь запускает бота по реферальной ссылке
-        try:
-            reward_type = (get_setting("referral_reward_type") or "percent_purchase").strip()
-        except Exception:
-            reward_type = "percent_purchase"
-        if reward_type == "fixed_start_referrer" and referrer_id and user_data and not user_data.get('referral_start_bonus_received'):
+        # Реферальный бонус: +3 дня к подписке пригласившего за каждого нового пользователя.
+        # Если подписки пока нет, дни сохраняются и применяются позже.
+        if referrer_id and user_data and not user_data.get('referral_start_bonus_received'):
+            days_bonus = REFERRAL_DAYS_PER_INVITE
+            applied_now = False
+            expiry_text = None
             try:
-                amount_raw = get_setting("referral_on_start_referrer_amount") or "20"
-                start_bonus = Decimal(str(amount_raw)).quantize(Decimal("0.01"))
+                applied_now, expiry_text = await _apply_referral_days_to_subscription(int(referrer_id), days_bonus)
+            except Exception as e:
+                logger.warning(f"Реферальный бонус (+дни): не удалось применить сразу для {referrer_id}: {e}")
+                applied_now = False
+
+            if not applied_now:
+                try:
+                    add_pending_referral_days(int(referrer_id), days_bonus)
+                except Exception as e:
+                    logger.warning(f"Реферальный бонус (+дни): не удалось сохранить pending дни для {referrer_id}: {e}")
+
+            try:
+                add_to_referral_balance_all(int(referrer_id), float(days_bonus))
+            except Exception as e:
+                logger.warning(f"Реферальный бонус (+дни): не удалось увеличить общий счётчик дней для {referrer_id}: {e}")
+
+            try:
+                set_referral_start_bonus_received(user_id)
             except Exception:
-                start_bonus = Decimal("20.00")
-            if start_bonus > 0:
-                try:
-                    ok = add_to_balance(int(referrer_id), float(start_bonus))
-                except Exception as e:
-                    logger.warning(f"Реферальный стартовый бонус: не удалось добавить к балансу для реферера {referrer_id}: {e}")
-                    ok = False
-                # Увеличиваем суммарный заработок по рефералке
-                try:
-                    add_to_referral_balance_all(int(referrer_id), float(start_bonus))
-                except Exception as e:
-                    logger.warning(f"Реферальный стартовый бонус: не удалось увеличить общий реферальный баланс для {referrer_id}: {e}")
-                # Помечаем, что для этого нового пользователя старт уже обработан, чтобы не дублировать при повторном /start
-                try:
-                    set_referral_start_bonus_received(user_id)
-                except Exception:
-                    pass
-                # Уведомим пригласившего
-                try:
-                    await bot.send_message(
-                        chat_id=int(referrer_id),
-                        text=(
-                            "🎁 Начисление за приглашение!\n"
-                            f"Новый пользователь: {message.from_user.full_name} (ID: {user_id})\n"
-                            f"Бонус: {float(start_bonus):.2f} RUB"
-                        )
-                    )
-                except Exception:
-                    pass
+                pass
+
+            try:
+                noir_text = (
+                    "🕶️ <b>NOIR//LINK SYNC</b>\n\n"
+                    f"Новый сигнал в сети: {message.from_user.full_name} (ID: {user_id})\n"
+                    f"Награда: +{days_bonus} дня к подписке.\n"
+                )
+                if applied_now:
+                    noir_text += f"Контур продлён до: {expiry_text if expiry_text else 'обновлено'}"
+                else:
+                    noir_text += "Подписка не найдена. Бонус сохранён в тени и сработает при следующем ключе."
+                await bot.send_message(chat_id=int(referrer_id), text=noir_text)
+            except Exception:
+                pass
 
         if user_data and user_data.get('agreed_to_terms'):
             await message.answer(
@@ -384,9 +428,11 @@ def get_user_router() -> Router:
             total_ref_earned = float(get_referral_balance_all(user_id))
         except Exception:
             total_ref_earned = 0.0
+        pending_days = get_pending_referral_days(user_id)
         final_text += (
             f"\n🤝 <b>Рефералы:</b> {referral_count}"
-            f"\n💰 <b>Заработано по рефералке (всего):</b> {total_ref_earned:.2f} RUB"
+            f"\n🕒 <b>Добавлено реферальных дней (всего):</b> {int(total_ref_earned)} дн."
+            f"\n🌘 <b>В резерве до следующего ключа:</b> {int(pending_days)} дн."
         )
         await callback.message.edit_text(final_text, reply_markup=keyboards.create_profile_keyboard())
 
@@ -447,24 +493,19 @@ def get_user_router() -> Router:
             referral_count = get_referral_count(user_id)
         except Exception:
             referral_count = 0
-            
         try:
             total_ref_earned = float(get_referral_balance_all(user_id))
         except Exception:
             total_ref_earned = 0.0
-            
-        try:
-            ref_balance = float(get_referral_balance(user_id))
-        except Exception:
-            ref_balance = 0.0
-        
+
+        pending_days = get_pending_referral_days(user_id)
         text = f"💰 <b>Информация о балансе</b>\n\n"
         text += f"💼 <b>Основной баланс:</b> {main_balance:.2f} RUB\n"
-        text += f"🤝 <b>Реферальный баланс:</b> {ref_balance:.2f} RUB\n"
-        text += f"📊 <b>Всего заработано по рефералке:</b> {total_ref_earned:.2f} RUB\n"
-        text += f"👥 <b>Приглашено пользователей:</b> {referral_count}\n\n"
-        text += f"💡 <b>Совет:</b> Используйте реферальный баланс для покупки ключей!"
-        
+        text += f"👥 <b>Приглашено пользователей:</b> {referral_count}\n"
+        text += f"🕒 <b>Получено по рефералке:</b> {int(total_ref_earned)} дн.\n"
+        text += f"🌘 <b>Отложено до следующего ключа:</b> {int(pending_days)} дн.\n\n"
+        text += f"💡 <b>Совет:</b> Реферальная система теперь продлевает подписку, а не пополняет баланс."
+
         builder = InlineKeyboardBuilder()
         builder.button(text="💳 Пополнить", callback_data="top_up_start")
         builder.button(text="⬅️ Назад", callback_data="show_profile")
@@ -939,14 +980,21 @@ def get_user_router() -> Router:
         referral_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
         referral_count = get_referral_count(user_id)
         try:
-            total_ref_earned = float(get_referral_balance_all(user_id))
+            total_ref_earned = int(float(get_referral_balance_all(user_id) or 0))
         except Exception:
-            total_ref_earned = 0.0
+            total_ref_earned = 0
+        try:
+            pending_days = int(get_pending_referral_days(user_id) or 0)
+        except Exception:
+            pending_days = 0
         text = (
-            "🤝 <b>Реферальная программа</b>\n\n"
-            f"<b>Ваша реферальная ссылка:</b>\n<code>{referral_link}</code>\n\n"
-            f"<b>Приглашено пользователей:</b> {referral_count}\n"
-            f"<b>Заработано по рефералке:</b> {total_ref_earned:.2f} RUB"
+            "🕶️ <b>NOIR//REFERRAL PROTOCOL</b>\n\n"
+            "Город шумит данными, а ты собираешь связи. Каждый человек, вошедший по твоему каналу, добавляет <b>+3 дня</b> к подписке.\n\n"
+            f"<b>Твой теневой линк:</b>\n<code>{referral_link}</code>\n\n"
+            f"👥 <b>Подключено агентов:</b> {referral_count}\n"
+            f"🕒 <b>Дней добавлено суммарно:</b> {total_ref_earned}\n"
+            f"🌘 <b>Дней в резерве:</b> {pending_days}\n\n"
+            "<i>Правило простое: сеть растёт — твоя линия держится дольше.</i>"
         )
 
         builder = InlineKeyboardBuilder()
@@ -960,28 +1008,26 @@ def get_user_router() -> Router:
     @registration_required
     async def about_handler(callback: types.CallbackQuery):
         await callback.answer()
-        
-        about_text = get_setting("about_text")
+
         terms_url = get_setting("terms_url")
         privacy_url = get_setting("privacy_url")
         channel_url = get_setting("channel_url")
-
-        final_text = about_text if about_text else "Информация о проекте не добавлена."
+        final_text = (
+            "◌ <b>MONOBOT // ARCHIVE NODE</b>\n\n"
+            "MonoBOT — приватный контур доступа с эстетикой тёмного интерфейса и прямой логикой без шума.\n\n"
+            "Здесь всё построено вокруг одной идеи: быстрый вход, чистое управление ключами, продление без лишних шагов и поддержка, которая отвечает по делу.\n\n"
+            "<i>Нуар. Хайтек. Никакой лишней болтовни.</i>"
+        )
 
         keyboard = keyboards.create_about_keyboard(channel_url, terms_url, privacy_url)
-
-        await callback.message.edit_text(
-            final_text,
-            reply_markup=keyboard,
-            disable_web_page_preview=True
-        )
+        await callback.message.edit_text(final_text, reply_markup=keyboard, disable_web_page_preview=True)
 
     @user_router.callback_query(F.data == "show_help")
     @registration_required
     async def about_handler(callback: types.CallbackQuery):
         await callback.answer()
         support_bot_username = get_setting("support_bot_username")
-        support_text = get_setting("support_text") or "Раздел поддержки. Нажмите кнопку ниже, чтобы открыть чат с поддержкой."
+        support_text = "✦ <b>SUPPORT // RELAY</b>\n\nЕсли в контуре возник шум, открой линию поддержки. Ответ придёт по защищённому каналу."
         if support_bot_username:
             await callback.message.edit_text(
                 support_text,
@@ -991,18 +1037,18 @@ def get_user_router() -> Router:
             support_user = get_setting("support_user")
             if support_user:
                 await callback.message.edit_text(
-                    "Для связи с поддержкой используйте кнопку ниже.",
+                    "✦ <b>SUPPORT // DIRECT LINK</b>\n\nНажми на кнопку ниже, чтобы выйти на линию поддержки.",
                     reply_markup=keyboards.create_support_keyboard(support_user)
                 )
             else:
-                await callback.message.edit_text("Контакты поддержки не настроены.", reply_markup=keyboards.create_back_to_menu_keyboard())
+                await callback.message.edit_text("✦ Контур поддержки ещё не сконфигурирован.", reply_markup=keyboards.create_back_to_menu_keyboard())
 
     @user_router.callback_query(F.data == "support_menu")
     @registration_required
     async def support_menu_handler(callback: types.CallbackQuery):
         await callback.answer()
         support_bot_username = get_setting("support_bot_username")
-        support_text = get_setting("support_text") or "Раздел поддержки. Нажмите кнопку ниже, чтобы открыть чат с поддержкой."
+        support_text = "✦ <b>SUPPORT // RELAY</b>\n\nЕсли в контуре возник шум, открой линию поддержки. Ответ придёт по защищённому каналу."
         if support_bot_username:
             await callback.message.edit_text(
                 support_text,
@@ -1012,31 +1058,11 @@ def get_user_router() -> Router:
             support_user = get_setting("support_user")
             if support_user:
                 await callback.message.edit_text(
-                    "Для связи с поддержкой используйте кнопку ниже.",
+                    "✦ <b>SUPPORT // DIRECT LINK</b>\n\nНажми на кнопку ниже, чтобы выйти на линию поддержки.",
                     reply_markup=keyboards.create_support_keyboard(support_user)
                 )
             else:
-                await callback.message.edit_text("Контакты поддержки не настроены.", reply_markup=keyboards.create_back_to_menu_keyboard())
-
-    @user_router.callback_query(F.data == "support_external")
-    @registration_required
-    async def support_external_handler(callback: types.CallbackQuery):
-        await callback.answer()
-        support_bot_username = get_setting("support_bot_username")
-        if support_bot_username:
-            await callback.message.edit_text(
-                get_setting("support_text") or "Раздел поддержки.",
-                reply_markup=keyboards.create_support_bot_link_keyboard(support_bot_username)
-            )
-            return
-        support_user = get_setting("support_user")
-        if not support_user:
-            await callback.message.edit_text("Внешний контакт поддержки не настроен.", reply_markup=keyboards.create_back_to_menu_keyboard())
-            return
-        await callback.message.edit_text(
-            "Для связи с поддержкой используйте кнопку ниже.",
-            reply_markup=keyboards.create_support_keyboard(support_user)
-        )
+                await callback.message.edit_text("✦ Контур поддержки ещё не сконфигурирован.", reply_markup=keyboards.create_back_to_menu_keyboard())
 
     @user_router.callback_query(F.data == "support_new_ticket")
     @registration_required
@@ -1796,6 +1822,54 @@ def get_user_router() -> Router:
         )
         await state.set_state(PaymentProcess.waiting_for_email)
 
+
+    @user_router.callback_query(F.data == "promo_quick_entry")
+    @registration_required
+    async def promo_quick_entry_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer()
+        await state.set_state(QuickPromoProcess.waiting_for_promo_code)
+        await callback.message.edit_text(
+            "🜂 <b>PROMO // ACTIVATION GATE</b>\n\nВведи код вручную. Если он активен, я зафиксирую его в контуре и применю на следующем шаге покупки.",
+            reply_markup=keyboards.create_back_to_menu_keyboard()
+        )
+
+    @user_router.message(QuickPromoProcess.waiting_for_promo_code)
+    async def quick_promo_input_handler(message: types.Message, state: FSMContext):
+        code = (message.text or "").strip()
+        if not code:
+            await message.answer("❌ Пустой код. Введите промокод ещё раз.")
+            return
+        promo, reason = check_promo_code_available(code, message.from_user.id)
+        if not promo:
+            reasons = {
+                "not_found": "❌ Код не найден в архиве.",
+                "inactive": "❌ Код деактивирован.",
+                "not_started": "❌ Код ещё не вошёл в силу.",
+                "expired": "❌ Время этого кода истекло.",
+                "total_limit_reached": "❌ Общий лимит активаций исчерпан.",
+                "user_limit_reached": "❌ Для тебя лимит по этому коду уже исчерпан.",
+                "db_error": "❌ Ошибка базы данных. Попробуй позже.",
+                "empty_code": "❌ Пустой код.",
+            }
+            await message.answer(reasons.get(reason or "not_found", "❌ Промокод недоступен."))
+            return
+        await state.update_data(
+            promo_code=promo.get("code"),
+            promo_discount_percent=promo.get("discount_percent"),
+            promo_discount_amount=promo.get("discount_amount"),
+        )
+        percent = promo.get("discount_percent")
+        amount = promo.get("discount_amount")
+        effect = f"скидка {percent}%" if percent else (f"скидка {amount} RUB" if amount else "код активирован")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬢ Перейти к покупке", callback_data="buy_new_key")
+        kb.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+        kb.adjust(1)
+        await message.answer(
+            f"✅ <b>PROMO // LINKED</b>\n\nКод <code>{promo.get('code')}</code> зафиксирован. Эффект: <b>{effect}</b>.\nСледующий шаг — открыть витрину ключей и завершить вход в контур.",
+            reply_markup=kb.as_markup()
+        )
+
     @user_router.callback_query(PaymentProcess.waiting_for_email, F.data == "back_to_plans")
     async def back_to_plans_handler(callback: types.CallbackQuery, state: FSMContext):
         data = await state.get_data()
@@ -1945,14 +2019,6 @@ def get_user_router() -> Router:
 
         await state.update_data(final_price=float(final_price))
 
-        effective_payment_methods = dict(PAYMENT_METHODS or {})
-        if effective_payment_methods.get("lavatop") and final_price != price:
-            effective_payment_methods["lavatop"] = False
-            message_text += (
-                "\n\nℹ️ Lava.top доступен только для оплаты по базовой цене тарифа "
-                "без скидок и промокодов."
-            )
-
         # Получаем основной баланс для показа кнопки оплаты с баланса
         try:
             main_balance = get_balance(message.chat.id)
@@ -1965,7 +2031,7 @@ def get_user_router() -> Router:
             await message.edit_text(
                 message_text,
                 reply_markup=keyboards.create_payment_method_keyboard(
-                    payment_methods=effective_payment_methods,
+                    payment_methods=PAYMENT_METHODS,
                     action=data.get('action'),
                     key_id=data.get('key_id'),
                     show_balance=show_balance_btn,
@@ -1978,7 +2044,7 @@ def get_user_router() -> Router:
             await message.answer(
                 message_text,
                 reply_markup=keyboards.create_payment_method_keyboard(
-                    payment_methods=effective_payment_methods,
+                    payment_methods=PAYMENT_METHODS,
                     action=data.get('action'),
                     key_id=data.get('key_id'),
                     show_balance=show_balance_btn,
@@ -2183,12 +2249,8 @@ def get_user_router() -> Router:
 
         customer_email = (data.get('customer_email') or get_setting("receipt_email") or "").strip()
         if not customer_email or not is_valid_email(customer_email):
-            await callback.message.answer(
-                "Для оплаты через Lava.top нужен корректный email.\n\n"
-                "Отправьте email в формате `name@example.com`.",
-                parse_mode="Markdown"
-            )
-            await state.set_state(PaymentProcess.waiting_for_email)
+            await callback.message.answer("Для оплаты через Lava.top нужен корректный email.")
+            await state.clear()
             return
 
         base_price = Decimal(str(plan['price']))
@@ -2211,13 +2273,6 @@ def get_user_router() -> Router:
 
         if final_price_decimal < Decimal('0'):
             final_price_decimal = Decimal('0.00')
-
-        if final_price_decimal != base_price:
-            await callback.message.answer(
-                "Lava.top сейчас доступен только для оплаты по полной цене тарифа "
-                "без скидок и промокодов. Выберите другой способ оплаты."
-            )
-            return
 
         months = int(plan['months'])
         amount_rub = int(final_price_decimal.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -3279,61 +3334,47 @@ async def process_successful_payment(bot: Bot, metadata: dict):
         elif action == "extend":
             update_key_info(key_id, result['client_uuid'], result['expiry_timestamp_ms'])
 
-        # Начисляем реферальное вознаграждение по покупке — применяется для new и extend
-        user_data = get_user(user_id)
-        referrer_id = user_data.get('referred_by') if user_data else None
-        if referrer_id:
+        # Денежная реферальная награда отключена.
+        # Если у пользователя есть отложенные дни, доклеиваем их к только что выданному/продлённому ключу.
+        try:
+            pending_days_for_user = int(get_pending_referral_days(user_id) or 0)
+        except Exception:
+            pending_days_for_user = 0
+
+        if pending_days_for_user > 0:
             try:
-                referrer_id = int(referrer_id)
+                current_email = generated_email if action == "new" else email
             except Exception:
-                logger.warning(f"Referral: invalid referrer_id={referrer_id} for user {user_id}")
-                referrer_id = None
-        if referrer_id:
-            # Выбор логики по типу: процент, фикс за покупку; для fixed_start_referrer — вознаграждение по покупке не начисляем
+                current_email = None
             try:
-                reward_type = (get_setting("referral_reward_type") or "percent_purchase").strip()
+                current_host = host_name
             except Exception:
-                reward_type = "percent_purchase"
-            reward = Decimal("0")
-            if reward_type == "fixed_start_referrer":
-                reward = Decimal("0")
-            elif reward_type == "fixed_purchase":
+                current_host = None
+            if current_email and current_host:
                 try:
-                    amount_raw = get_setting("fixed_referral_bonus_amount") or "50"
-                    reward = Decimal(str(amount_raw)).quantize(Decimal("0.01"))
-                except Exception:
-                    reward = Decimal("50.00")
-            else:
-                # percent_purchase (по умолчанию)
-                try:
-                    percentage = Decimal(get_setting("referral_percentage") or "0")
-                except Exception:
-                    percentage = Decimal("0")
-                reward = (Decimal(str(price)) * percentage / 100).quantize(Decimal("0.01"))
-            logger.info(f"Referral: user={user_id}, referrer={referrer_id}, type={reward_type}, reward={float(reward):.2f}")
-            if float(reward) > 0:
-                try:
-                    ok = add_to_balance(referrer_id, float(reward))
+                    pending_result = await xui_api.create_or_update_key_on_host(current_host, current_email, days_to_add=pending_days_for_user)
                 except Exception as e:
-                    logger.warning(f"Referral: add_to_balance failed for referrer {referrer_id}: {e}")
-                    ok = False
-                try:
-                    add_to_referral_balance_all(referrer_id, float(reward))
-                except Exception as e:
-                    logger.warning(f"Failed to increment referral_balance_all for {referrer_id}: {e}")
-                referrer_username = user_data.get('username', 'пользователь') if user_data else 'пользователь'
-                if ok:
+                    logger.warning(f"Pending referral days: cannot apply for {user_id}: {e}")
+                    pending_result = None
+                if pending_result and pending_result.get('client_uuid') and pending_result.get('expiry_timestamp_ms'):
+                    try:
+                        update_key_info(key_id, pending_result['client_uuid'], int(pending_result['expiry_timestamp_ms']))
+                    except Exception as e:
+                        logger.warning(f"Pending referral days: cannot update key info for {user_id}: {e}")
+                    try:
+                        clear_pending_referral_days(user_id)
+                    except Exception:
+                        pass
                     try:
                         await bot.send_message(
-                            chat_id=referrer_id,
+                            chat_id=user_id,
                             text=(
-                                "💰 Вам начислено реферальное вознаграждение!\n"
-                                f"Пользователь: {referrer_username} (ID: {user_id})\n"
-                                f"Сумма: {float(reward):.2f} RUB"
+                                "🕶️ <b>NOIR//BONUS INJECTED</b>\n\n"
+                                f"К твоему ключу добавлено ещё {pending_days_for_user} дн. из реферального резерва."
                             )
                         )
-                    except Exception as e:
-                        logger.warning(f"Could not send referral reward notification to {referrer_id}: {e}")
+                    except Exception:
+                        pass
 
         # Не учитываем в "Потрачено всего" покупки, оплаченные с внутреннего баланса
         try:

@@ -1417,7 +1417,7 @@ def get_admin_router() -> Router:
         text = (
             f"🤝 <b>Рефералы пользователя {user_id}</b>\n\n"
             f"Всего приглашено: {ref_count}\n"
-            f"Заработано по рефералке (всего): {total_ref_earned:.2f} RUB\n\n"
+            f"Начислено реферальных дней (всего): {int(total_ref_earned)} дн.\n\n"
             + ("\n".join(lines) if lines else "Пока нет рефералов")
             + more_suffix
         )

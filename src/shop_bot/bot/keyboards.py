@@ -189,6 +189,10 @@ def create_main_menu_keyboard(user_keys: list, trial_available: bool, is_admin: 
     # Try DB-driven keyboard first
     kb = _build_keyboard_from_db('main_menu', text_replacements=replacements, filter_func=_filter)
     if kb:
+        try:
+            kb.inline_keyboard.append([InlineKeyboardButton(text="🜂 Активировать промокод", callback_data="promo_quick_entry")])
+        except Exception:
+            pass
         return kb
     
     # Fallback to original implementation if DB config not available
@@ -319,7 +323,7 @@ def create_main_menu_keyboard(user_keys: list, trial_available: bool, is_admin: 
 
     builder.button(text=(get_setting("btn_profile") or "👤 Мой профиль"), callback_data="show_profile")
     keys_label_tpl = (get_setting("btn_my_keys") or "🔑 Мои ключи ({count})")
-    builder.button(text=keys_label_tpl.replace("{count}", str(len(user_keys))), callback_data="manage_keys")
+    builder.button(text=f"⌬ Активные ключи [{len(user_keys)}]", callback_data="manage_keys")
     builder.button(text=(get_setting("btn_buy_key") or "💳 Купить ключ"), callback_data="buy_new_key")
     builder.button(text=(get_setting("btn_top_up") or "➕ Пополнить баланс"), callback_data="top_up_start")
     builder.button(text=(get_setting("btn_referral") or "🤝 Реферальная программа"), callback_data="show_referral_program")
@@ -327,13 +331,15 @@ def create_main_menu_keyboard(user_keys: list, trial_available: bool, is_admin: 
     builder.button(text=(get_setting("btn_about") or "ℹ️ О проекте"), callback_data="show_about")
     builder.button(text=(get_setting("btn_howto") or "❓ Как использовать"), callback_data="howto_vless")
     builder.button(text=(get_setting("btn_speed") or "⚡ Тест скорости"), callback_data="user_speedtest")
+    builder.button(text="🎟️ Активировать промокод", callback_data="promo_quick_entry")
     if is_admin:
-        builder.button(text=(get_setting("btn_admin") or "⚙️ Админка"), callback_data="admin_menu")
+        builder.button(text="⚙︎ Консоль оператора", callback_data="admin_menu")
 
     layout = [
         1 if trial_available and get_setting("trial_enabled") == "true" else 0,  # триал
         2,  # профиль + мои ключи
         2,  # купить ключ + пополнить баланс
+        1,  # промокод
         1,  # рефералка
         2,  # поддержка + о проекте
         2,  # как использовать + тест скорости
@@ -538,7 +544,7 @@ def create_support_keyboard(support_user: str | None = None) -> InlineKeyboardMa
         builder.button(text=(get_setting("btn_back_to_menu") or "⬅️ Назад в меню"), callback_data="back_to_main_menu")
     else:
         # Фолбэк: встроенное меню поддержки
-        builder.button(text=(get_setting("btn_support") or "🆘 Поддержка"), callback_data="show_help")
+        builder.button(text="✦ Узел поддержки", callback_data="show_help")
         builder.button(text=(get_setting("btn_back_to_menu") or "⬅️ Назад в меню"), callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -670,7 +676,7 @@ def create_payment_method_keyboard(
     if payment_methods and payment_methods.get("cryptobot"):
         builder.button(text="🤖 CryptoBot", callback_data="pay_cryptobot")
     if payment_methods and payment_methods.get("lavatop"):
-        builder.button(text="🌋 Lava.top (Оплата картой РФ)", callback_data="pay_lavatop")
+        builder.button(text="🌋 Lava.top", callback_data="pay_lavatop")
     if payment_methods and payment_methods.get("yoomoney"):
         builder.button(text="💜 ЮMoney (кошелёк)", callback_data="pay_yoomoney")
     if payment_methods and payment_methods.get("stars"):

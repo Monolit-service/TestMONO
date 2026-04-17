@@ -852,13 +852,13 @@ document.addEventListener('DOMContentLoaded', function () {
         const sections = Array.from(document.querySelectorAll('[data-ref-section]'));
         if (!select || sections.length === 0) return;
         function apply(){
-            const val = (select.value || 'percent_purchase').trim();
+            const val = (select.value || 'subscription_days').trim();
             sections.forEach(sec => {
                 const show = sec.getAttribute('data-ref-section') === val;
                 sec.style.display = show ? '' : 'none';
                 sec.querySelectorAll('input,select,textarea,button').forEach(el => el.disabled = !show);
             });
-            if (compatToggle) compatToggle.value = (val === 'fixed_purchase') ? 'true' : 'false';
+            if (compatToggle) compatToggle.value = 'false';
         }
         apply();
         select.addEventListener('change', apply);
