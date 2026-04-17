@@ -125,6 +125,7 @@ class PaymentProcess(StatesGroup):
     waiting_for_email = State()
     waiting_for_payment_method = State()
     waiting_for_promo_code = State()
+    waiting_for_cryptobot_payment = State()
 
 class QuickPromoProcess(StatesGroup):
     waiting_for_promo_code = State()
