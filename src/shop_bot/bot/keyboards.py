@@ -190,7 +190,7 @@ def create_main_menu_keyboard(user_keys: list, trial_available: bool, is_admin: 
     kb = _build_keyboard_from_db('main_menu', text_replacements=replacements, filter_func=_filter)
     if kb:
         try:
-            kb.inline_keyboard.append([InlineKeyboardButton(text="🜂 Активировать промокод", callback_data="promo_quick_entry")])
+            kb.inline_keyboard.append([InlineKeyboardButton(text="❗ Активировать промокод", callback_data="promo_quick_entry")])
         except Exception:
             pass
         return kb
@@ -331,7 +331,7 @@ def create_main_menu_keyboard(user_keys: list, trial_available: bool, is_admin: 
     builder.button(text=(get_setting("btn_about") or "ℹ️ О проекте"), callback_data="show_about")
     builder.button(text=(get_setting("btn_howto") or "❓ Как использовать"), callback_data="howto_vless")
     builder.button(text=(get_setting("btn_speed") or "⚡ Тест скорости"), callback_data="user_speedtest")
-    builder.button(text="🎟️ Активировать промокод", callback_data="promo_quick_entry")
+    builder.button(text="❗ Активировать промокод", callback_data="promo_quick_entry")
     if is_admin:
         builder.button(text="⚙︎ Консоль оператора", callback_data="admin_menu")
 
