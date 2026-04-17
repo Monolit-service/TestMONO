@@ -1830,7 +1830,7 @@ def get_user_router() -> Router:
         await callback.answer()
         await state.set_state(QuickPromoProcess.waiting_for_promo_code)
         await callback.message.edit_text(
-            "🜂 <b>PROMO // ACTIVATION GATE</b>\n\nВведи код вручную. Если он активен, я зафиксирую его в контуре и применю на следующем шаге покупки.",
+            "❗ <b>PROMO // ACTIVATION GATE</b>\n\nВведи код вручную. Если он активен, я зафиксирую его в контуре и применю на следующем шаге покупки.",
             reply_markup=keyboards.create_back_to_menu_keyboard()
         )
 
